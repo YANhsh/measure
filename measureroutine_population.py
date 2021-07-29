@@ -81,12 +81,38 @@ class qubit():
     def setvalue(self,name,value):
         self.__setattr__(name,value)
 
+
+################################################################################
+# IQ-Mixer
+################################################################################
+
+class IQMixer():
+    def __init__(self,**kws):
+        attribute = ['index','q_name','inst','lo','image']
+        for j in attribute:
+            self.__setattr__(j,None)
+        if len(kws) != 0:
+            for i in kws:
+                self.__setattr__(i,kws[i])
+    def asdict(self):
+        return self.__dict__
+
+    def replace(self,**kws):
+        for i in kws:
+            # if self.__getattribute__(i):
+            if hasattr(self,i):
+                self.__setattr__(i,kws[i])
+            else:
+                raise(f'atrribute {i} is not existed')
+
+
 class common():
     global t_list, t_new
-    def __init__(self,freqall={},ats=None,dc=None,psg=None,awg=None,attinst=None,jpa=None,qubits={},iqmixers={}):
+    def __init__(self,freqall={},ats=None,dc=None,psg=None,awg=None,attinst=None,jpa=None,qubits={},ats2=None,iqmixers={}):
     
         self.freqall = freqall
         self.ats = ats
+        self.ats2 = ats2
         self.dc = dc
         self.psg = psg
         self.awg = awg
@@ -218,7 +244,7 @@ def index_max(f,rg,N,dM):   ###f一维元组，rg剪掉的范围，N寻找的次
     index=sorted(index)
     return index
     
-def index_merge(index1,index2,length):
+def index_merge(index1,index2,length,rg=100):
     a = []
     for i in index1:
         for k in index2:
@@ -227,9 +253,8 @@ def index_merge(index1,index2,length):
             start = max(min(start0.copy(),end0.copy()),0)
             end = min(max(start0.copy(),end0.copy()),length-1)
             if start0 == end0:
-                start = max(start0.copy()-10,0)
-                end = min(end0.copy()+10,length-1)
-            start
+                start = max(start0.copy()-rg,0)
+                end = min(end0.copy()+rg,length-1)
             a.append([start,end])
     t = sorted(a.copy())
     b=[t.copy()[0]]
@@ -501,32 +526,6 @@ async def resetAwg(awg):
         #         await awg[i].write('SOUR%d:TINP %s'%((m+1),'ITR'))
 
 ################################################################################
-# AWG同步
-################################################################################
-
-async def awgSync(measure):
-    t_list = measure.t_list
-    wf = WF(t_list)
-    awg_list = measure.awg
-    for i in awg_list:
-        wait = 'ATR' if awg_list[i] == awg_list['awg_trig'] else 'ATR'
-        await awg_list[i].create_waveform(name=''.join((i,'_sync1')),length=len(measure.t_list),format=None)
-        await awg_list[i].create_sequence(name=''.join((i,'_syncSeq')),steps=3,tracks=1)
-        height,t_end,width = [1],[np.max(t_list)/2],[2000]
-        sample = wf.square_wave(t_end,width,height)
-        await awg_list[i].update_marker(name=''.join((i,'_sync1')),mk1=sample)
-        for j in range(3):
-            j += 1
-            goto = 'FIRST' if j == 3 else 'NEXT'
-            await awg_list[i].set_sequence_step(name=''.join((i,'_syncSeq')),sub_name=[''.join((i,'_sync1'))],\
-                                                   step=j,wait=wait,goto=goto,repeat=1,jump=None)
-        await awg_list[i].use_sequence(name=''.join((i,'_syncSeq')),channels=[8])
-        await awg_list[i].query('*OPC?')
-        await awg_list[i].output_on(ch=8)
-        await awg_list[i].setValue('Force Jump',1,ch=8)
-        await awg_list[i].run()  
-
-################################################################################
 # 等效磁通计算
 ################################################################################
 
@@ -555,13 +554,11 @@ async def resn(f_cavity):
     n = len(f_cavity)
     return f_lo, delta, n
 
-
-
 ################################################################################
-# 直流源设置
+# 直流源设置  IQ
 ################################################################################
 
-async def dcManage(measure,dcstate={},readstate=[],calimatrix=None,qnum=10,readamp=0.3):
+async def dcManage(measure,dcstate={},readstate=[],calimatrix=None,qnum=10):
     matrix = np.mat(np.eye(qnum)) if np.all(calimatrix) == None else np.mat(calimatrix)
     bias = [0] * qnum
     fread = []
@@ -594,16 +591,17 @@ async def dcManage(measure,dcstate={},readstate=[],calimatrix=None,qnum=10,reada
 ################################################################################
 
 async def exMixing(f):
-    if f == {}:
+    if len(f) <=1:
         return 
-    qname = [i for i in f]
-    f_ex = np.array([f[i] for i in f])
-    # ex_lo = f_ex.mean() - 100e6  #161e6
-    ex_lo = f_ex.mean() - 180e6
-    delta =  -(ex_lo - f_ex)
-    delta_ex = {qname[i]:delta[i] for i in range(len(qname))}
-    # n = len(f_ex)
-    return ex_lo, delta_ex
+    if len(f)>1:
+        qname = [i for i in f]
+        f_ex = np.array([f[i] for i in f])
+        # ex_lo = f_ex.mean() - 100e6  #161e6
+        ex_lo = f_ex.mean() - 180e6
+        delta =  -(ex_lo - f_ex)
+        delta_ex = {qname[i]:delta[i] for i in range(len(qname))}
+        # n = len(f_ex)
+        return ex_lo, delta_ex
 
 ################################################################################
 # 激励源设置
@@ -833,36 +831,36 @@ async def rPhase(measure,phase):
 # 优化读出IQMixer
 ################################################################################
 
-async def readIQMixer(measure,var1,var2):
-    optkind = 'LO'
+async def readIQMixer(measure,var1,var2,optkind='LO',mode=0):
     awg = measure.awg['awgread']
-    ch_I, ch_Q = 1,5
+    ch = [1,2]
     f_list = np.array(await measure.ats.getValue('f_list'))
     if optkind == 'LO':
-        await awg.setValue('Offset',var1,ch=ch_I)
-        await awg.setValue('Offset',var2,ch=ch_Q)
+        await awg.setValue('Offset',var1,ch=ch[0])
+        await awg.setValue('Offset',var2,ch=ch[1])
         time.sleep(1)
-        await cww.couldRun(awg)
+        # await cww.couldRun(measure,awg)
         I, Q = 0, 0
         for i in range(10):
-            chA, chB, ch_I, ch_Q = await measure.ats.getTraces(hilbert=False,is2ch=False,offset=False)
+            chA, chB = await measure.ats.getTraces()
             I += chA
             Q += chB
         I, Q = I / 10, Q / 10
     if optkind == 'Imag':
         pulse = await cww.rabiWave(envelopename=['square',1],nwave=1,amp=1,phaseDiff=var2,pi_len=2000e-9,shift=-2000e-9,delta_ex=f_list[0])
         wav_I, wav_Q, mrk1, mrk2 = pulse
-        await cww.writeWave(awg,['opt_I','opt_Q'],(wav_I, wav_Q, mrk1, mrk2))
-        await cww.couldRun(awg)
+        # await cww.writeWave(awg,['opt_I','opt_Q'],(wav_I, wav_Q, mrk1, mrk2))
+        await cww.writeWave(measure,awg,ch,pulse,mode=mode)
+        # await cww.couldRun(measure,awg)
         I, Q = 0, 0
         for i in range(10):
-            chA, chB, ch_I, ch_Q = await measure.ats.getTraces(hilbert=False,is2ch=False,offset=False)
+            chA, chB = await measure.ats.getTraces()
             I += chA
             Q += chB
         I, Q = I / 10, Q / 10
     f = np.fft.fftshift(np.fft.fftfreq(len(I)))*1e9
     Pxx = np.abs(np.fft.fftshift(np.fft.fft(I + 1j*Q)))
-    return  dt.nearest(f,0,np.abs(Pxx)) if optkind == 'LO' else dt.nearest(f,-f_list[0],np.abs(Pxx))
+    yield  dt.nearest(f,0,np.abs(Pxx)) if optkind == 'LO' else dt.nearest(f,-f_list[0],np.abs(Pxx))
 
 ################################################################################
 # 重新混频
@@ -1016,14 +1014,14 @@ async def specbias_awg(measure,qubit,ftarget,bias,dcstate={},calimatrix=None,mod
 ################################################################################
 
 async def spec2d(qubit,measure,freq,calimatrix,modulation=False,readstate=[]):
-    current = np.linspace(-qubit.T_bias[0]*0.31,qubit.T_bias[0]*0.31,32) + qubit.T_bias[1] 
+    current = np.linspace(-qubit.T_bias[0]*0.31,qubit.T_bias[0]*0.31,32) 
     # await dcManage(measure,dcstate={},readstate=[f'q{i+1}' for i in range(10)],calimatrix=calimatrix)
     await dcManage(measure,dcstate={},readstate=readstate,calimatrix=calimatrix)
     f_ex = qubit.f_max
     freq = np.arange(f_ex-1.2,f_ex+0.1,0.001)*1e9
     
     for i in current:
-        await dcManage(measure,dcstate={qubit.q_name:i},readstate={qubit.q_name},calimatrix=calimatrix)
+        await dcManage(measure,dcstate={qubit.q_name:i+ qubit.T_bias[1] },readstate={qubit.q_name},calimatrix=calimatrix)
         # await measure.dc[qubit.q_name].DC(i)
         job = Job(singlespec, (measure,freq,modulation,measure.f_lo,True,[qubit.q_name]),auto_save=False,max=len(freq))
         f_ss, s_ss = await job.done()
@@ -1032,39 +1030,55 @@ async def spec2d(qubit,measure,freq,calimatrix,modulation=False,readstate=[]):
     await measure.dc[qubit.q_name].DC(0)
 
 async def spec2d2(qubit,measure,calimatrix,modulation=False,readstate=[],rg=10,N=6,dM=0.5):
-    current = np.linspace(0.001,qubit.T_bias[0]*0.31,17) 
-    await dcManage(measure,dcstate={},readstate=readstate,calimatrix=calimatrix)
+    current = np.linspace(-qubit.T_bias[0]*0.32,qubit.T_bias[0]*0.32,33)
+    await dcManage(measure,dcstate={},readstate={qubit.q_name},calimatrix=calimatrix)
     f_ex = qubit.f_max
-    freq = np.arange(f_ex-1.2,f_ex+0.1,0.001)*1e9
-    start0 = np.argmax(freq)-300
+    freq = np.arange(f_ex-1.4,f_ex+0.1,0.001)*1e9
+    freq_shape=[]
+    for k in freq:
+        freq_shape.append([k]*measure.n)
+
+    start0 = np.argmax(freq)
     end0 = np.argmax(freq)
     length = len(freq)
-    index0=[[start0,end0]]
+    index0=[[0,start0-700]]
+    index1=[[start0-200,end0]]
+    index2=[[start0-330,start0-120]]
     Indexp = []
     Indexm = []
     for j,i in enumerate(current):
-        pop_p = np.zeros((length,measure.n))
-        pop_m = np.zeros((length,measure.n))
-        if j<=5:
-            await dcManage(measure,dcstate={qubit.q_name:i+qubit.T_bias[1]},readstate=None,calimatrix=calimatrix)
-            job = Job(singlespec, (measure,freq[start0:end0],modulation,measure.f_lo,True,[qubit.q_name]),auto_save=False,max=len(freq[start0:end0]))
-            f_ssp, s_ssp = await job.done()
-            pop_p[start0:end0] = s_ssp
-            indexp = index_max(pop_p,rg,N,dM) 
-            Indexp +=indexp
+        pop = np.zeros((length,measure.n))
+        if i<=-qubit.T_bias[0]*0.05:
+            if len(Indexm)<=1:
+                Index = index0.copy()
+            else:
+                Index = index_merge(Indexm.copy()[-2],Indexm.copy()[-1],length)
+        
+        if abs(i)<qubit.T_bias[0]*0.05:
+            Index = index1.copy()
+        if i>=qubit.T_bias[0]*0.05:
+            if len(Indexp)<=1:
+                Index = index2.copy()
+            else:
+                Index = index_merge(Indexp.copy()[-2],Indexp.copy()[-1],length)
+    
+        await dcManage(measure,dcstate={qubit.q_name:i+qubit.T_bias[1]},readstate={qubit.q_name},calimatrix=calimatrix)
+        for I in Index:
+            if i<=-qubit.T_bias[0]*0.05:
+                I[1]+=20
+            if i >=qubit.T_bias[0]*0.05:
+                I[0]+=(-20)
+            job = Job(singlespec, (measure,freq[I[0]:I[1]],modulation,measure.f_lo,True,[qubit.q_name]),auto_save=False,max=len(freq[I[0]:I[1]]))
+            f_ss, s_ss = await job.done()
+            pop[I[0]:I[1]] = np.abs(s_ss)
+        indexs = index_max(pop.copy(),rg,N,dM) 
+        if i<=-qubit.T_bias[0]*0.05:
+            Indexm.append(indexs)
+        if i>=qubit.T_bias[0]*0.05:
+            Indexp.append(indexs)
 
-            await dcManage(measure,dcstate={qubit.q_name:-i+qubit.T_bias[1]},readstate=None,calimatrix=calimatrix)
-            job = Job(singlespec, (measure,freq[start0:end0],modulation,measure.f_lo,True,[qubit.q_name]),auto_save=False,max=len(freq[start0:end0]))
-            f_ssm, s_ssm = await job.done()
-            pop_m[start0:end0] = s_ssm
-            indexm = index_max(pop_m,rg,N,dM) 
-            Indexm += indexm
-
-            f_ss = [f_ssp,f_ssm]
-            s_ss = [s_ssp,s_ssm]
-        if j>5:
-            0
-        yield [i+qubit.T_bias[1], -i+qubit.T_bias[1]]*measure.n, f_ss, s_ss
+        yield [i+qubit.T_bias[1]]*measure.n, freq_shape, pop
+    await dcManage(measure,dcstate={},readstate={qubit.q_name},calimatrix=calimatrix)
 
 ################################################################################
 # Spec2d_awg
@@ -1087,11 +1101,6 @@ async def spec2d_awg(qubit,measure,current,freq,calimatrix,modulation=False,read
         task = await executeZwave(measure,cww.zWave,dcstate={qubit.q_name:i},\
             calimatrix=calimatrix,output=output,during=(len(measure.t_new)/2.5/2e9+2000e-9),offset=0,shift=200e-9)
         await concurrence(task)
-        # flux = await zManage(measure,dcstate={qubit.q_name:i},calimatrix=calimatrix)
-        # pulselist = await cww.funcarg(cww.zWave,qubit,pi_len=27000e-9,volt=flux[qubit.q_name],shift=100e-9)
-        # # pulselist = await cww.funcarg(cww.rabiWave,qubit,pi_len=27000e-9,amp=flux[qubit.q_name])
-        # await cww.writeWave(measure,z_awg,name=namelist,pulse=pulselist[:1])
-        # await cww.couldRun(measure,z_awg,chlist,namelist)
         job = Job(singlespec, (measure,freq,modulation,measure.f_lo,False,[qubit.q_name]),auto_save=False,max=len(freq))
         f_ss, s_ss = await job.done()
         n = np.shape(s_ss)[1]
@@ -1114,38 +1123,54 @@ async def spec2d_awg2(qubit,measure,current,calimatrix,modulation=False,rg=10,N=
 
     res = await again(qubit,measure,False,measure.f_lo)
     f_ex = qubit.f_max
-    freq = np.arange(f_ex-1.2,f_ex+0.1,0.001)*1e9
+    freq = np.arange(f_ex-1.4,f_ex+0.1,0.001)*1e9
     freq_shape=[]
     for k in freq:
         freq_shape.append([k]*measure.n)
 
-    start = np.argmin(freq)
-    end = np.argmax(freq)
+    start0 = np.argmax(freq)
+    end0 = np.argmax(freq)
     length = len(freq)
-    index0=[[start,end]]
-    index=index0.copy()
+    index0=[[0,start0-700]]
+    index1=[[start0-200,end0]]
+    index2=[[start0-330,start0-120]]
+    Indexp = []
+    Indexm = []
     for j,i in enumerate(current):
         output = True if j== 0 else False
         task = await executeZwave(measure,cww.zWave,dcstate={qubit.q_name:i},\
             calimatrix=calimatrix,output=output,during=(len(measure.t_new)/2.5/2e9+2000e-9),offset=0,shift=200e-9)
         await concurrence(task)
+
+        if i<=-qubit.T_bias[0]*0.05:
+            if len(Indexm)<=1:
+                Index = index0.copy()
+            else:
+                Index = index_merge(Indexm.copy()[-2],Indexm.copy()[-1],length)
         
-        # index=index0.copy()  
+        if abs(i)<qubit.T_bias[0]*0.05:
+            Index = index1.copy()
+        if i>=qubit.T_bias[0]*0.05:
+            if len(Indexp)<=1:
+                Index = index2.copy()
+            else:
+                Index = index_merge(Indexp.copy()[-2],Indexp.copy()[-1],length)
+    
         pop_m = np.zeros((length,measure.n))
-        for I in index:
+        for I in Index:
+            if i<=-qubit.T_bias[0]*0.05:
+                I[1]+=20
+            if i >=qubit.T_bias[0]*0.05:
+                I[0]+=(-20)
             job = Job(singlespec, (measure,freq[I[0]:I[1]],modulation,measure.f_lo,False,[qubit.q_name]),auto_save=True,max=len(freq[I[0]:I[1]]))
             f_ss, s_ss = await job.done()
             pop_m[I[0]:I[1]] = np.abs(s_ss)
         indexs = index_max(pop_m,rg,N,dM) 
-        if j==0:
-            index1 = indexs.copy()
-        if j >0:
-            if index1 == indexs:
-                index=index0.copy()
-            else:
-                index2 = indexs.copy()
-                index = index_merge(index1,index2,length)
-            index1 = indexs.copy()
+        if i<= -qubit.T_bias[0]*0.05:
+            Indexm.append(indexs)
+        if i>= qubit.T_bias[0]*0.05:
+            Indexp.append(indexs)
+
         yield [i]*measure.n, freq_shape, pop_m
     await cww.OffEx([qubit.q_name],measure)
     await cww.OffZ([qubit.q_name],measure)
@@ -1413,10 +1438,39 @@ async def fRamsey(measure,t_rabi,exstate=[],pop=False):
     qubit.replace(nwave=1,seqtype='CPMG')
 
 ################################################################################
+# 比特能级差
+################################################################################
+async def QLevel(measure,z_volt,exstate,zqubit,pop=False,calimatrix=None):
+    qubit = measure.qubits[exstate[0]]
+    ex_ch = qubit.inst['ex_ch']
+    ex_awg = measure.awg[qubit.inst['ex_awg']]
+    await measure.psg['psg_lo'].setValue('Output','ON')
+    await measure.psg[qubit.inst['ex_lo']].setValue('Output','ON')
+    await measure.psg[qubit.inst['ex_lo']].setValue('Frequency',qubit.f_ex-qubit.delta_ex)
+    
+    for i in z_volt:
+        pi_len = 200*1e-9
+        amp = qubit.amp
+        interval = 4e-9
+        pulse1 = await cww.funcarg(qgw.singleQgate,qubit,axis='X',shift=100e-9+2*qubit.pi_len+2*pi_len+2*interval)
+        pulse2 = await cww.funcarg(cww.rabiWave,qubit,pi_len=pi_len,delta_ex=(qubit.delta_ex-qubit.alphaq),shift=100e-9+2*qubit.pi_len+interval,amp=amp)
+        pulse3 = await cww.funcarg(qgw.singleQgate,qubit,axis='X',shift=100e-9)
+        pulse = np.array(pulse1) + np.array(pulse2) + np.array(pulse3)
+        await cww.writeWave(measure,ex_awg,ex_ch,pulse)
+        
+        zstate={zqubit[0]:i}
+        task_z = await executeZwave(measure,cww.zWave,dcstate=zstate,qnum=len(zstate),calimatrix=calimatrix,\
+            offset=0,during=2*pi_len+interval,shift=100e-9+2*qubit.pi_len+0.5*interval,args='volt')  
+        await concurrence(task_z)
+
+        s = await popRead(measure,pop=pop)
+        yield [i]*measure.n, s
+
+################################################################################
 # 比特能级差rabi
 ################################################################################
 
-async def QRabi(measure,t_rabi,exstate=[],pop=False):
+async def QRabi(measure,t_rabi,exstate,zstate={},pop=False,calimatrix=None):
     qubit = measure.qubits[exstate[0]]
     ex_ch = qubit.inst['ex_ch']
     ex_awg = measure.awg[qubit.inst['ex_awg']]
@@ -1433,6 +1487,10 @@ async def QRabi(measure,t_rabi,exstate=[],pop=False):
         pulse3 = await cww.funcarg(qgw.singleQgate,qubit,axis='X',shift=100e-9)
         pulse = np.array(pulse1) + np.array(pulse2) + np.array(pulse3)
         await cww.writeWave(measure,ex_awg,ex_ch,pulse)
+        
+        task_z = await executeZwave(measure,cww.zWave,dcstate=zstate,qnum=len(zstate),calimatrix=calimatrix,\
+            offset=0,during=2*pi_len+interval,shift=100e-9+2*qubit.pi_len+0.5*interval,args='volt')  
+        await concurrence(task_z)
 
         s = await popRead(measure,pop=pop)
         yield [i]*measure.n, s
@@ -1461,7 +1519,7 @@ async def QRamsey(measure,t_rabi,exstate=[],zstate={},pop=False,calimatrix=None)
         await cww.writeWave(measure,ex_awg,ex_ch,pulse)
 
         task_z = await executeZwave(measure,cww.zWave,dcstate=zstate,qnum=len(zstate),calimatrix=calimatrix,\
-            offset=0,during=i/1e9,shift=100e-9+qubit.pi_len2+qubit.pi_lenq+1.5*interval,args='volt')     ##不包围XX
+            offset=0,during=i/1e9,shift=100e-9+qubit.pi_len2+qubit.pi_lenq+1.5*interval,args='volt')   
         await concurrence(task_z)
 
         s = await popRead(measure,pop=pop)
@@ -3140,7 +3198,7 @@ async def zPulse_pop(measure,t_T1,height=0,exstate=[]):
         
         if np.max(pop_m[:,qubit.index]) > 0.5 :
             index = np.argmax(pop_m[:,qubit.index])
-            start, end = index-10, index+10
+            start, end = index-12, index+12
             if start < 0:
                 start = 0
             if end > length-1:
